@@ -1,0 +1,1 @@
+mkdir models && cd models && git clone https://www.modelscope.cn/onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX.git

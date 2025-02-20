@@ -3,6 +3,7 @@ import {
   AutoModelForCausalLM,
   TextStreamer,
   InterruptableStoppingCriteria,
+  env,
 } from "@huggingface/transformers";
 
 /**
@@ -28,7 +29,7 @@ async function check() {
  * This class uses the Singleton pattern to enable lazy-loading of the pipeline
  */
 class TextGenerationPipeline {
-  static model_id = "onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
+  static model_id = "DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
 
   static async getInstance(progress_callback = null) {
     this.tokenizer ??= AutoTokenizer.from_pretrained(this.model_id, {
@@ -132,6 +133,10 @@ async function load() {
     status: "loading",
     data: "Loading model...",
   });
+
+  env.allowLocalModels = true;
+  env.allowRemoteModels = false;
+  env.localModelPath = '/models/';
 
   // Load the pipeline and save it for future use.
   const [tokenizer, model] = await TextGenerationPipeline.getInstance((x) => {
