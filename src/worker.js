@@ -48,6 +48,8 @@ class TextGenerationPipeline {
 
 const stopping_criteria = new InterruptableStoppingCriteria();
 
+const profile_data = new Map();
+
 let past_key_values_cache = null;
 async function generate(messages) {
   // Retrieve the text-generation pipeline.
@@ -126,6 +128,16 @@ async function generate(messages) {
     status: "complete",
     output: decoded,
   });
+
+  const mapSort = new Map([...profile_data.entries()].sort((a, b) => b[1] - a[1]));
+  let i = 0;
+  for (const item of mapSort.entries()) {
+    console.log(item[0], item[1]);
+    i++;
+    if (i > 100) {
+      break;
+    }
+  }
 }
 
 async function load() {
@@ -154,6 +166,24 @@ async function load() {
   const inputs = tokenizer("a");
   await model.generate({ ...inputs, max_new_tokens: 1 });
   self.postMessage({ status: "ready" });
+
+  env.backends.onnx.webgpu.profiling = { mode: 'default', ondata: ((data) => {
+    const time = data.endTime - data.startTime;
+    var inputsDim = '';
+    for (const data1 of data.inputsMetadata) {
+      inputsDim += '[' + data1.dims.toString() + ']';
+    }
+    inputsDim += ' ';
+    for (const data1 of data.outputsMetadata) {
+      inputsDim += '[' + data1.dims.toString() + ']';
+    }
+    const key = data.kernelType + ' ' + inputsDim;
+    if (profile_data.has(key)) {
+      profile_data[key] += time;
+    } else {
+      profile_data.set(key, time);
+    }
+  })};
 }
 // Listen for messages from the main thread
 self.addEventListener("message", async (e) => {
