@@ -1,8 +1,5 @@
 import {
   AutoTokenizer,
-  AutoModelForCausalLM,
-  TextStreamer,
-  InterruptableStoppingCriteria,
   env,
 } from "@huggingface/transformers";
 import ort from 'onnxruntime-web/webgpu'
@@ -51,7 +48,7 @@ class LLM {
     }
     this.inferenceSession =
       await ort.InferenceSession.create(modelBytes, inferenceSessionOptions);
-    console.log('Create session success!');
+    //console.log('Create session success!');
 
     this.eos = BigInt(modelConfig.eos_token_id);
     this.num_hidden_layers = modelConfig.num_hidden_layers;
@@ -111,7 +108,7 @@ update_kv_cache(outputs, feed) {
         const cache = await caches.open("onnx");
         let cachedResponse = await cache.match(url);
         if (cachedResponse === undefined) {
-            console.log(`${url} (network)`);
+            //console.log(`${url} (network)`);
             const buffer = await fetch(url).then(response => response.arrayBuffer());
             try {
                 await cache.put(url, new Response(buffer));
@@ -120,7 +117,7 @@ update_kv_cache(outputs, feed) {
             }
             return buffer;
         }
-        console.log(`${url} (cached)`);
+        //console.log(`${url} (cached)`);
         const data = await cachedResponse.arrayBuffer();
         return data;
     } catch (error) {
@@ -129,7 +126,7 @@ update_kv_cache(outputs, feed) {
     }
   }
 
-  async query(messages, callback, token_callback_function) {
+  async query(messages, callback_function = null, token_callback_function = null) {
     const inferenceInputIds = this.tokenizer.apply_chat_template(messages, {
       add_generation_prompt: true,
     });
@@ -152,7 +149,7 @@ update_kv_cache(outputs, feed) {
             (_, i) => BigInt(seqlen - input_len + i)),
             [1, input_len]);
 
-    console.log('Start inferencing.')
+    //console.log('Start inferencing.')
     let last_token = 0n;
     const kMaxOutputTokens = 2048;
     while (last_token != this.eos && seqlen < kMaxOutputTokens) {
@@ -170,14 +167,16 @@ update_kv_cache(outputs, feed) {
         output_tokens.push(last_token);
 
         const text = this.TokensToText([last_token]);
-        token_callback_function([last_token]);
-        callback(text);
+        if (token_callback_function && callback_function) {
+          token_callback_function([last_token]);
+          callback_function(text);
+        }
     
         this.update_kv_cache(outputs, feed);
         feed['input_ids'] = new ort.Tensor('int64', BigInt64Array.from([last_token]), [1, 1]);
         feed['position_ids'] = new ort.Tensor('int64', BigInt64Array.from([BigInt(seqlen)]), [1, 1]);
     }
-    console.log('Inferencing completed!')
+    //console.log('Inferencing completed!')
   }
 }
 
@@ -233,13 +232,15 @@ async function load() {
   env.allowRemoteModels = false;
   env.localModelPath = '/models/';
 
+  llm = new LLM();
+  await llm.init();
+
   self.postMessage({
     status: "loading",
     data: "Compiling shaders and warming up model...",
   });
 
-  llm = new LLM();
-  await llm.init();
+  llm.query(["a"]);
 
   self.postMessage({ status: "ready" });
 }
