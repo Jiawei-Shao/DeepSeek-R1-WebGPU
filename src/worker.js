@@ -7,26 +7,9 @@ import {
 } from "@huggingface/transformers";
 import ort from 'onnxruntime-web/webgpu'
 
-/**
- * Helper function to perform feature detection for WebGPU
- */
-// let fp16_supported = false;
-async function check() {
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      throw new Error("WebGPU is not supported (no adapter found)");
-    }
-    // fp16_supported = adapter.features.has("shader-f16")
-  } catch (e) {
-    self.postMessage({
-      status: "error",
-      data: e.toString(),
-    });
-  }
-}
-
 class LLM {
+  model_id = "DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
+
   tokenizer = undefined;
   inferenceSession = undefined;
 
@@ -34,21 +17,30 @@ class LLM {
   num_hidden_layers = 0;
 
   eos = 0n;
+  end_thinking_token_id = 0;
 
-  async init(tokenizer) {
+  async init() {
     ort.env.wasm.wasmPaths = '/dist/';
     ort.env.wasm.numThreads = 1;
 
-    this.tokenizer = tokenizer;
+    this.tokenizer = await AutoTokenizer.from_pretrained(this.model_id);
 
-    const modelBytes = await this.fetchAndCache(`/models/DeepSeek-R1-Distill-Qwen-1.5B-ONNX/onnx/model_q4f16.onnx`);
+    // 151648: <think>
+    // 151649: </think>
+    const [END_THINKING_TOKEN_ID] = llm.tokenizer.encode(
+      "</think>",
+      { add_special_tokens: false },
+    );
+    this.end_thinking_token_id = END_THINKING_TOKEN_ID;
+
+    const modelBytes = await this.fetchAndCache(`/models/${this.model_id}/onnx/model_q4f16.onnx`);
     let modelSize = modelBytes.byteLength;
     console.log(`${Math.round(modelSize / 1024 / 1024)} MB`);
     const inferenceSessionOptions = {
       executionProviders: ["webgpu"],
       preferredOutputLocation: {},
     };
-    const jsonBytes = await this.fetchAndCache(`/models/DeepSeek-R1-Distill-Qwen-1.5B-ONNX/config.json`);
+    const jsonBytes = await this.fetchAndCache(`/models/${this.model_id}/config.json`);
     const textDecoder = new TextDecoder();
     const modelConfig = JSON.parse(textDecoder.decode(jsonBytes));
     for (let i = 0; i < modelConfig.num_hidden_layers; ++i) {
@@ -61,7 +53,7 @@ class LLM {
       await ort.InferenceSession.create(modelBytes, inferenceSessionOptions);
     console.log('Create session success!');
 
-    this.eos = modelConfig.eos_token_id;
+    this.eos = BigInt(modelConfig.eos_token_id);
     this.num_hidden_layers = modelConfig.num_hidden_layers;
     this.kv_dims =
         [1, modelConfig.num_key_value_heads, 0,
@@ -112,9 +104,9 @@ update_kv_cache(outputs, feed) {
             feed[newName] = outputs[name];
         }
     }
-}
+  }
 
-async fetchAndCache(url) {
+  async fetchAndCache(url) {
     try {
         const cache = await caches.open("onnx");
         let cachedResponse = await cache.match(url);
@@ -137,7 +129,11 @@ async fetchAndCache(url) {
     }
   }
 
-  async query(inferenceInputIds, callback, token_callback_function) {
+  async query(messages, callback, token_callback_function) {
+    const inferenceInputIds = this.tokenizer.apply_chat_template(messages, {
+      add_generation_prompt: true,
+    });
+
     let feed = {};
     const empty = new Uint16Array();
     for (let i = 0; i < this.num_hidden_layers; ++i) {
@@ -157,11 +153,9 @@ async fetchAndCache(url) {
             [1, input_len]);
 
     console.log('Start inferencing.')
-    //const promptTokensCount = inferenceInputIds.size;
     let last_token = 0n;
-    // 32007 is |<end>| according to tokenizer.js so it is also an ending.
     const kMaxOutputTokens = 2048;
-    while (last_token != this.eos && last_token != 32007 && seqlen < kMaxOutputTokens) {
+    while (last_token != this.eos && seqlen < kMaxOutputTokens) {
         
         seqlen = output_tokens.length;
         feed['attention_mask'] = new ort.Tensor('int64', BigInt64Array.from({ length: seqlen }, () => 1n), [1, seqlen]);
@@ -169,10 +163,13 @@ async fetchAndCache(url) {
         const outputs = await this.inferenceSession.run(feed);
         last_token = BigInt(this.argmax(outputs.logits));
 
+        if (last_token === this.eos) {
+          break;
+        }
+
         output_tokens.push(last_token);
 
         const text = this.TokensToText([last_token]);
-
         token_callback_function([last_token]);
         callback(text);
     
@@ -184,48 +181,12 @@ async fetchAndCache(url) {
   }
 }
 
-/**
- * This class uses the Singleton pattern to enable lazy-loading of the pipeline
- */
-class TextGenerationPipeline {
-  static model_id = "DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
+let llm = null;
 
-  static async getInstance(progress_callback = null) {
-    this.tokenizer ??= AutoTokenizer.from_pretrained(this.model_id, {
-      progress_callback,
-    });
-
-    this.model ??= AutoModelForCausalLM.from_pretrained(this.model_id, {
-      dtype: "q4f16",
-      device: "webgpu",
-      progress_callback,
-    });
-
-    return Promise.all([this.tokenizer, this.model]);
-  }
-}
-
-const stopping_criteria = new InterruptableStoppingCriteria();
-
-let past_key_values_cache = null;
 async function generate(messages) {
-  // Retrieve the text-generation pipeline.
-  const [tokenizer, model] = await TextGenerationPipeline.getInstance();
-
-  const llm = new LLM();
-  await llm.init(tokenizer);
-
-  const inputs = tokenizer.apply_chat_template(messages, {
-    add_generation_prompt: true,
-    return_dict: true,
-  });
-
-  // 151648: <think>
-  // 151649: </think>
-  const [START_THINKING_TOKEN_ID, END_THINKING_TOKEN_ID] = tokenizer.encode(
-    "<think></think>",
-    { add_special_tokens: false },
-  );
+  if (!llm) {
+    return;
+  }
 
   let state = "thinking"; // 'thinking' or 'answering'
   let startTime;
@@ -237,7 +198,7 @@ async function generate(messages) {
     if (numTokens++ > 0) {
       tps = (numTokens / (performance.now() - startTime)) * 1000;
     }
-    if (tokens[0] == END_THINKING_TOKEN_ID) {
+    if (tokens[0] == llm.end_thinking_token_id) {
       state = "answering";
     }
   };
@@ -254,11 +215,7 @@ async function generate(messages) {
   // Tell the main thread we are starting
   self.postMessage({ status: "start" });
 
-  const inputs_no_dict = tokenizer.apply_chat_template(messages, {
-    add_generation_prompt: true,
-  });
-
-  await llm.query(inputs_no_dict, callback_function, token_callback_function);
+  await llm.query(messages, callback_function, token_callback_function);
 
   // Send the output back to the main thread
   self.postMessage({
@@ -276,23 +233,31 @@ async function load() {
   env.allowRemoteModels = false;
   env.localModelPath = '/models/';
 
-  // Load the pipeline and save it for future use.
-  const [tokenizer, model] = await TextGenerationPipeline.getInstance((x) => {
-    // We also add a progress callback to the pipeline so that we can
-    // track model loading.
-    self.postMessage(x);
-  });
-
   self.postMessage({
     status: "loading",
     data: "Compiling shaders and warming up model...",
   });
 
-  // Run model with dummy input to compile shaders
-  const inputs = tokenizer("a");
-  await model.generate({ ...inputs, max_new_tokens: 1 });
+  llm = new LLM();
+  await llm.init();
+
   self.postMessage({ status: "ready" });
 }
+
+async function check() {
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      throw new Error("WebGPU is not supported (no adapter found)");
+    }
+  } catch (e) {
+    self.postMessage({
+      status: "error",
+      data: e.toString(),
+    });
+  }
+}
+
 // Listen for messages from the main thread
 self.addEventListener("message", async (e) => {
   const { type, data } = e.data;
@@ -307,17 +272,13 @@ self.addEventListener("message", async (e) => {
       break;
 
     case "generate":
-      stopping_criteria.reset();
       generate(data);
       break;
 
     case "interrupt":
-      stopping_criteria.interrupt();
       break;
 
     case "reset":
-      past_key_values_cache = null;
-      stopping_criteria.reset();
       break;
   }
 });
