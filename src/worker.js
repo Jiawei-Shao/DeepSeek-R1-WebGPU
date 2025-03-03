@@ -7,7 +7,9 @@ import ort from 'onnxruntime-web/webgpu'
 class LLM {
   model_id = "DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
 
+  model_data_file_name = `model_q4f16.onnx`;
   model_data_file = `/models/${this.model_id}/onnx/model_q4f16.onnx`;
+  model_config_file_name = `config.json`;
   model_config_file = `/models/${this.model_id}/config.json`;
 
   tokenizer = undefined;
@@ -23,7 +25,11 @@ class LLM {
     ort.env.wasm.wasmPaths = '/dist/';
     ort.env.wasm.numThreads = 1;
 
-    this.tokenizer = await AutoTokenizer.from_pretrained(this.model_id);
+    const callback = (x) => {
+      self.postMessage(x);
+    };
+
+    this.tokenizer = await AutoTokenizer.from_pretrained(this.model_id, callback);
 
     // 151648: <think>
     // 151649: </think>
@@ -33,14 +39,26 @@ class LLM {
     );
     this.end_thinking_token_id = END_THINKING_TOKEN_ID;
 
-    const modelBytes = await this.fetchAndCache(this.model_data_file);
+    const modelBytes = await this.fetchAndCache(this.model_data_file, callbackInfo => {
+      callback({
+        name: this.model_id,
+        filename: this.model_data_file_name,
+        ...callbackInfo,
+      })
+    });
     let modelSize = modelBytes.byteLength;
     console.log(`${Math.round(modelSize / 1024 / 1024)} MB`);
     const inferenceSessionOptions = {
       executionProviders: ["webgpu"],
       preferredOutputLocation: {},
     };
-    const jsonBytes = await this.fetchAndCache(this.model_config_file);
+    const jsonBytes = await this.fetchAndCache(this.model_config_file, callbackInfo => {
+      callback({
+        name: this.model_id,
+        filename: this.model_config_file_name,
+        ...callbackInfo,
+      })
+    });
     const textDecoder = new TextDecoder();
     const modelConfig = JSON.parse(textDecoder.decode(jsonBytes));
     for (let i = 0; i < modelConfig.num_hidden_layers; ++i) {
@@ -106,7 +124,11 @@ update_kv_cache(outputs, feed) {
     }
   }
 
-  async fetchAndCache(url) {
+  async fetchAndCache(url, callback) {
+    callback({
+      status: 'initiate',
+    });
+
     try {
         const cache = await caches.open("onnx");
         let cachedResponse = await cache.match(url);
@@ -118,10 +140,20 @@ update_kv_cache(outputs, feed) {
             } catch (error) {
                 console.error(error);   
             }
+
+            callback({
+              status: 'done',
+            });
+
             return buffer;
         }
         //console.log(`${url} (cached)`);
         const data = await cachedResponse.arrayBuffer();
+
+        callback({
+          status: 'done',
+        });
+  
         return data;
     } catch (error) {
         console.log(`can't fetch ${url}`);
