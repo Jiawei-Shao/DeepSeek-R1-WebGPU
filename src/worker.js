@@ -240,7 +240,7 @@ async function load() {
     data: "Compiling shaders and warming up model...",
   });
 
-  llm.query(["a"]);
+  await llm.query(["a"]);
 
   self.postMessage({ status: "ready" });
 }
