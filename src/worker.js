@@ -7,6 +7,9 @@ import ort from 'onnxruntime-web/webgpu'
 class LLM {
   model_id = "DeepSeek-R1-Distill-Qwen-1.5B-ONNX";
 
+  model_data_file = `/models/${this.model_id}/onnx/model_q4f16.onnx`;
+  model_config_file = `/models/${this.model_id}/config.json`;
+
   tokenizer = undefined;
   inferenceSession = undefined;
 
@@ -30,14 +33,14 @@ class LLM {
     );
     this.end_thinking_token_id = END_THINKING_TOKEN_ID;
 
-    const modelBytes = await this.fetchAndCache(`/models/${this.model_id}/onnx/model_q4f16.onnx`);
+    const modelBytes = await this.fetchAndCache(this.model_data_file);
     let modelSize = modelBytes.byteLength;
     console.log(`${Math.round(modelSize / 1024 / 1024)} MB`);
     const inferenceSessionOptions = {
       executionProviders: ["webgpu"],
       preferredOutputLocation: {},
     };
-    const jsonBytes = await this.fetchAndCache(`/models/${this.model_id}/config.json`);
+    const jsonBytes = await this.fetchAndCache(this.model_config_file);
     const textDecoder = new TextDecoder();
     const modelConfig = JSON.parse(textDecoder.decode(jsonBytes));
     for (let i = 0; i < modelConfig.num_hidden_layers; ++i) {
