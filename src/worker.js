@@ -42,7 +42,7 @@ class LLM {
     const modelBytes = await this.fetchAndCache(this.model_data_file, callbackInfo => {
       callback({
         name: this.model_id,
-        filename: this.model_data_file_name,
+        file: this.model_data_file_name,
         ...callbackInfo,
       })
     });
@@ -55,7 +55,7 @@ class LLM {
     const jsonBytes = await this.fetchAndCache(this.model_config_file, callbackInfo => {
       callback({
         name: this.model_id,
-        filename: this.model_config_file_name,
+        file: this.model_config_file_name,
         ...callbackInfo,
       })
     });
@@ -69,7 +69,6 @@ class LLM {
     }
     this.inferenceSession =
       await ort.InferenceSession.create(modelBytes, inferenceSessionOptions);
-    //console.log('Create session success!');
 
     this.eos = BigInt(modelConfig.eos_token_id);
     this.num_hidden_layers = modelConfig.num_hidden_layers;
@@ -131,29 +130,31 @@ update_kv_cache(outputs, feed) {
 
     try {
         const cache = await caches.open("onnx");
-        let cachedResponse = await cache.match(url);
-        if (cachedResponse === undefined) {
-            //console.log(`${url} (network)`);
-            const buffer = await fetch(url).then(response => response.arrayBuffer());
-            try {
-                await cache.put(url, new Response(buffer));
-            } catch (error) {
-                console.error(error);   
-            }
-
-            callback({
-              status: 'done',
-            });
-
-            return buffer;
+        let response = await cache.match(url);
+        const cacheMiss = response === undefined;
+        if (cacheMiss) {
+          callback({
+            status: 'download',
+          });
+          response = await fetch(url);
         }
-        //console.log(`${url} (cached)`);
-        const data = await cachedResponse.arrayBuffer();
+
+        const data = await this.readResponse(response, callback);
+
+        if (cacheMiss) {
+          try {
+              await cache.put(url, new Response(data, {
+                headers: networkResponse.headers
+              }));
+          } catch (error) {
+              console.error(error);
+          }
+        }
 
         callback({
           status: 'done',
         });
-  
+
         return data;
     } catch (error) {
         console.log(`can't fetch ${url}`);
@@ -161,7 +162,54 @@ update_kv_cache(outputs, feed) {
     }
   }
 
-  async query(messages, callback_function = null, token_callback_function = null) {
+  // Referenced from transformers.js/src/utils/hub.js
+  async readResponse(response, callback) {
+    const contentLength = response.headers.get('Content-Length');
+    let total = parseInt(contentLength ?? '0');
+    let buffer = new Uint8Array(total);
+    let loaded = 0;
+
+    const reader = response.body.getReader();
+    async function read() {
+        const { done, value } = await reader.read();
+        if (done) return;
+
+        let newLoaded = loaded + value.length;
+        if (newLoaded > total) {
+            total = newLoaded;
+
+            // Adding the new data will overflow buffer.
+            // In this case, we extend the buffer
+            let newBuffer = new Uint8Array(total);
+
+            // copy contents
+            newBuffer.set(buffer);
+
+            buffer = newBuffer;
+        }
+        buffer.set(value, loaded)
+        loaded = newLoaded;
+
+        const progress = (loaded / total) * 100;
+
+        // Call your function here
+        callback({
+            status: 'progress',
+            progress: progress,
+            loaded: loaded,
+            total: total,
+        })
+
+        return read();
+    }
+
+    // Actually read
+    await read();
+
+    return buffer;
+  }
+
+  async query(messages, max_output_tokens, callback_function = null, token_callback_function = null) {
     const inferenceInputIds = this.tokenizer.apply_chat_template(messages, {
       add_generation_prompt: true,
     });
@@ -184,10 +232,8 @@ update_kv_cache(outputs, feed) {
             (_, i) => BigInt(seqlen - input_len + i)),
             [1, input_len]);
 
-    //console.log('Start inferencing.')
     let last_token = 0n;
-    const kMaxOutputTokens = 2048;
-    while (last_token != this.eos && seqlen < kMaxOutputTokens) {
+    while (last_token != this.eos && seqlen < max_output_tokens) {
         
         seqlen = output_tokens.length;
         feed['attention_mask'] = new ort.Tensor('int64', BigInt64Array.from({ length: seqlen }, () => 1n), [1, seqlen]);
@@ -211,13 +257,12 @@ update_kv_cache(outputs, feed) {
         feed['input_ids'] = new ort.Tensor('int64', BigInt64Array.from([last_token]), [1, 1]);
         feed['position_ids'] = new ort.Tensor('int64', BigInt64Array.from([BigInt(seqlen)]), [1, 1]);
     }
-    //console.log('Inferencing completed!')
   }
 }
 
 let llm = null;
 
-async function generate(messages) {
+async function generate(messages, max_output_tokens) {
   if (!llm) {
     return;
   }
@@ -249,7 +294,7 @@ async function generate(messages) {
   // Tell the main thread we are starting
   self.postMessage({ status: "start" });
 
-  await llm.query(messages, callback_function, token_callback_function);
+  await llm.query(messages, max_output_tokens, callback_function, token_callback_function);
 
   // Send the output back to the main thread
   self.postMessage({
@@ -275,7 +320,8 @@ async function load() {
     data: "Compiling shaders and warming up model...",
   });
 
-  await llm.query(["a"]);
+  const max_output_tokens = 2;
+  await llm.query(["a"], max_output_tokens);
 
   self.postMessage({ status: "ready" });
 }
@@ -308,7 +354,8 @@ self.addEventListener("message", async (e) => {
       break;
 
     case "generate":
-      generate(data);
+      const max_output_tokens = 2048;
+      generate(data, max_output_tokens);
       break;
 
     case "interrupt":
